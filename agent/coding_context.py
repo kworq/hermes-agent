@@ -390,8 +390,12 @@ def _resolve_cwd(cwd: Optional[str | Path]) -> Path:
 def _git_root(cwd: Path) -> Optional[Path]:
     current = cwd.resolve()
     for parent in [current, *current.parents]:
-        if (parent / ".git").exists():
-            return parent
+        try:
+            if (parent / ".git").exists():
+                return parent
+        except OSError:
+            # Stale/unreadable cwd (e.g. /root after user migration).
+            continue
     return None
 
 

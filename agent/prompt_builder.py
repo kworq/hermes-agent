@@ -93,8 +93,13 @@ def _find_git_root(start: Path) -> Optional[Path]:
     """
     current = start.resolve()
     for parent in [current, *current.parents]:
-        if (parent / ".git").exists():
-            return parent
+        try:
+            if (parent / ".git").exists():
+                return parent
+        except OSError:
+            # e.g. PermissionError when cwd points at a directory this
+            # user can no longer read (stale cwd after user migration).
+            continue
     return None
 
 
@@ -118,8 +123,12 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     for directory in search_dirs:
         for name in _HERMES_MD_NAMES:
             candidate = directory / name
-            if candidate.is_file():
-                return candidate
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                # Unreadable dir (e.g. stale cwd after user migration).
+                break
         if stop_at and directory == stop_at:
             break
     return None
@@ -2583,14 +2592,32 @@ def build_context_files_prompt(
             cwd_path,
         )
         project_context = ""
+    elif not os.access(cwd_path, os.R_OK | os.X_OK):
+        # cwd is unreadable by this user (e.g. a stale /root cwd persisted
+        # before a root -> unprivileged-user migration). Any Path.exists()/
+        # is_file() probe inside it raises PermissionError and would crash
+        # the whole turn, so skip project-context discovery entirely.
+        logger.warning(
+            "skipping project-context discovery: working directory %s is "
+            "not readable by this user",
+            cwd_path,
+        )
+        project_context = ""
     else:
         # Priority-based project context: first match wins
-        project_context = (
-            _load_hermes_md(cwd_path, context_length)
-            or _load_agents_md(cwd_path, context_length)
-            or _load_claude_md(cwd_path, context_length)
-            or _load_cursorrules(cwd_path, context_length)
-        )
+        try:
+            project_context = (
+                _load_hermes_md(cwd_path, context_length)
+                or _load_agents_md(cwd_path, context_length)
+                or _load_claude_md(cwd_path, context_length)
+                or _load_cursorrules(cwd_path, context_length)
+            )
+        except OSError as e:
+            logger.warning(
+                "skipping project-context discovery: %s while probing %s",
+                e, cwd_path,
+            )
+            project_context = ""
     if project_context:
         sections.append(project_context)
 
