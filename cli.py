@@ -5302,6 +5302,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # Validate each toolset — MCP server names are resolved via
             # live registry aliases (registered during discover_mcp_tools),
             # but discovery hasn't run yet at this point, so exclude them.
+            # Plugin discovery may still be running in the background thread
+            # started by _prepare_agent_startup(); join it first so
+            # plugin-registered toolsets (e.g. a2a) don't get falsely
+            # flagged as unknown (discover_plugins() is an idempotent join).
+            try:
+                from hermes_cli.plugins import discover_plugins
+                discover_plugins()
+            except Exception:
+                pass
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
             invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
             if invalid:
