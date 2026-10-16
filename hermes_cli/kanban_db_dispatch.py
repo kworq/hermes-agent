@@ -388,10 +388,53 @@ def _worker_alive(pid: Optional[int], started_at) -> bool:
     (a claim is never released beside a possibly-live worker) but ``_terminate_reclaimed_worker``
     refuses to signal it."""
     if not _kb._pid_alive(pid):
-        return False
+        # A worker owned by another uid on a shared board is invisible here when procfs is
+        # restricted (systemd ProtectProc=invisible / hidepid): psutil says "gone" while kill(0)
+        # says EPERM. We can neither prove it dead nor prove it recycled, so hold the claim — the
+        # dispatcher that spawned it (same uid) can see it and owns the reap. Never signalled:
+        # ``_pid_recycled`` reports the unreadable fingerprint as foreign.
+        return _pid_hidden_but_exists(pid)
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
     return not _pid_recycled(pid, started_at)
+
+
+def _pid_hidden_but_exists(pid: Optional[int]) -> bool:
+    """POSIX: True when ``pid`` exists but procfs hides it from this process (another uid behind
+    ProtectProc=invisible / hidepid=2). ``kill(pid, 0)`` is not subject to procfs visibility:
+    EPERM = exists under another uid, ESRCH = gone."""
+    if not pid or pid <= 0 or sys.platform == "win32" or not hasattr(os, "kill"):
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        return not os.path.exists(f"/proc/{int(pid)}")
+    except OSError:
+        return False
+    return False
+
+
+def _fingerprints_agree(current: Optional[str], recorded: str) -> bool:
+    """Compare ``"<boot_id>:<pid1_start>|<start>"`` fingerprints. The PID-1 start component is
+    empty when PID 1 is hidden from the reader (ProtectProc=invisible in a hardened unit), so a
+    sandboxed dispatcher and an unsandboxed reader disagree on it for the SAME process. When either
+    side lacks it, fall back to boot_id + process start ticks (still reboot-proof via boot_id)."""
+    if current is None:
+        return False
+    if current == recorded:
+        return True
+    try:
+        cur_epoch, cur_start = current.rsplit("|", 1)
+        rec_epoch, rec_start = recorded.rsplit("|", 1)
+    except ValueError:
+        return False
+    if cur_start != rec_start:
+        return False
+    cur_boot, _, cur_pid1 = cur_epoch.partition(":")
+    rec_boot, _, rec_pid1 = rec_epoch.partition(":")
+    if cur_boot != rec_boot:
+        return False
+    return not (cur_pid1 and rec_pid1) or cur_pid1 == rec_pid1
 
 
 def _pid_recycled(pid: Optional[int], started_at) -> bool:
@@ -404,7 +447,7 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
     if isinstance(started_at, str) and "|" in started_at:
-        return _process_fingerprint(int(pid)) != started_at
+        return not _fingerprints_agree(_process_fingerprint(int(pid)), started_at)
     from gateway.status import _start_times_agree, get_process_start_time
     current = get_process_start_time(int(pid))
     if current is None:
